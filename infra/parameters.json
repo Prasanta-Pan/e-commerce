@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environment": {
+      // Allowed values: dev | staging | prod
+      // Controls SKU tiers (e.g. ACR Basic vs Premium, APIM Developer vs Standard)
+      "value": "dev"
+    },
+    "location": {
+      // Azure region for all primary resources.
+      // Use 'australiaeast', 'eastus', 'westeurope', etc.
+      "value": "australiaeast"
+    },
+    "prefix": {
+      // Short 3-8 character alphanumeric prefix used to name resources.
+      // Must be globally unique enough to avoid ACR/APIM naming collisions.
+      "value": "ecomm"
+    },
+    "kubernetesVersion": {
+      // AKS Kubernetes version. Check 'az aks get-versions --location <region>'
+      // for supported versions in your target region.
+      "value": "1.28.5"
+    },
+    "postgresAdminUser": {
+      // PostgreSQL server administrator username.
+      // Cannot be 'azure_superuser', 'admin', 'administrator', 'root', 'guest'.
+      "value": "pgadmin"
+    },
+    "postgresAdminPassword": {
+      // PostgreSQL administrator password.
+      // IMPORTANT: Do NOT store real passwords in this file.
+      // In CI/CD, override via --parameters postgresAdminPassword=$SECRET_VAR
+      // or reference an Azure Key Vault secret using a reference object:
+      // { "reference": { "keyVault": { "id": "<kv-resource-id>" }, "secretName": "pg-admin-password" } }
+      "value": "<REPLACE_WITH_SECURE_PASSWORD>"
+    },
+    "apimPublisherEmail": {
+      // Email address for API Management publisher notifications and alerts.
+      "value": "platform-team@contoso.com"
+    },
+    "apimPublisherName": {
+      // Organisation name shown in the APIM developer portal.
+      "value": "E-Commerce Platform"
+    },
+    "uiOrigin": {
+      // Public HTTPS origin of the React SPA served through Azure Front Door.
+      // Used in APIM CORS policy. Example: https://shop.contoso.com
+      "value": "https://shop.contoso.com"
+    },
+    "aadTenantId": {
+      // Azure Active Directory (Entra ID) Tenant ID.
+      // Found under Azure AD > Overview > Tenant ID (GUID).
+      "value": "<YOUR_AAD_TENANT_ID>"
+    },
+    "aadApiClientId": {
+      // Client ID of the 'ecommerce-api' App Registration in Azure AD.
+      // Found under Azure AD > App Registrations > ecommerce-api > Application (client) ID.
+      // Used by APIM's validate-jwt policy to verify token audience.
+      "value": "<YOUR_API_APP_CLIENT_ID>"
+    }
+  }
+}
