@@ -1,307 +1,118 @@
 # ============================================================
-# azure-pipelines.yml — Root Pipeline
-# E-Commerce Platform: Infrastructure deployment +
-# triggers for all service pipelines
+# azure-pipelines.yml — Root Pipeline (Infrastructure only)
+# Runs Terraform plan/apply for Azure infrastructure.
+# Each microservice has its own pipeline in its own repo.
+#
+# SETUP REQUIRED in Azure DevOps:
+# 1. Service connection to Azure named 'ecommerce-azure-connection'
+#    (Project Settings → Service connections → Azure Resource Manager)
+# 2. Variable group named 'ecommerce-global-vars' with:
+#    - AZURE_SUBSCRIPTION_ID
+#    - RESOURCE_GROUP_NAME   (your existing resource group)
+#    - TF_STATE_RG           (resource group where TF state storage lives)
+#    - TF_STATE_SA           (storage account name for TF state)
 # ============================================================
 
-trigger:
-  branches:
-    include:
-      - main
-      - staging
-      - develop
-  paths:
-    include:
-      - infra/**
-      - azure-pipelines.yml
+trigger: none   # Manual trigger only — run from Azure DevOps UI
+pr: none        # No automatic PR builds
 
-pr:
-  branches:
-    include:
-      - main
-      - staging
-      - develop
-  paths:
-    include:
-      - infra/**
-
-# ─── Pipeline Resources (service pipelines) ───────────────────────────────────
-resources:
-  pipelines:
-    - pipeline: product-service-pipeline
-      source: 'product-service'
-      trigger:
-        branches:
-          include:
-            - main
-            - staging
-
-    - pipeline: order-service-pipeline
-      source: 'order-service'
-      trigger:
-        branches:
-          include:
-            - main
-            - staging
-
-    - pipeline: invoice-service-pipeline
-      source: 'invoice-service'
-      trigger:
-        branches:
-          include:
-            - main
-            - staging
-
-    - pipeline: ecommerce-ui-pipeline
-      source: 'ecommerce-ui'
-      trigger:
-        branches:
-          include:
-            - main
-            - staging
-
-# ─── Variables ────────────────────────────────────────────────────────────────
 variables:
-  - group: ecommerce-global-vars   # Variable group in Azure DevOps Library
-  # Contains: AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID, RESOURCE_GROUP_DEV,
-  #           RESOURCE_GROUP_STAGING, RESOURCE_GROUP_PROD,
-  #           POSTGRES_ADMIN_PASSWORD (secret), APIM_PUBLISHER_EMAIL,
-  #           AAD_TENANT_ID, AAD_API_CLIENT_ID, UI_ORIGIN
+  - group: ecommerce-global-vars
+  - name: TF_DIR
+    value: 'infra'
+  - name: TF_VERSION
+    value: '1.6.6'
 
-  - name: bicepParametersFile
-    value: 'infra/parameters.json'
-
-  - name: bicepMainFile
-    value: 'infra/main.bicep'
-
-# ─── Stage: Validate Bicep ────────────────────────────────────────────────────
 stages:
-  - stage: ValidateBicep
-    displayName: 'Validate Bicep Templates'
-    condition: always()
+
+  # ─── Stage 1: Terraform Init + Plan ───────────────────────────────────────
+  - stage: TerraformPlan
+    displayName: 'Terraform Plan'
     jobs:
-      - job: BicepLint
-        displayName: 'Bicep Lint & What-If'
+      - job: Plan
+        displayName: 'terraform init + plan'
         pool:
           vmImage: 'ubuntu-latest'
         steps:
           - checkout: self
 
-          - task: AzureCLI@2
-            displayName: 'Install Bicep CLI'
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform $(TF_VERSION)'
             inputs:
-              azureSubscription: 'ecommerce-azure-connection'
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                az bicep install
-                az bicep version
+              terraformVersion: '$(TF_VERSION)'
 
-          - task: AzureCLI@2
-            displayName: 'Bicep Build (lint check)'
+          - task: TerraformTaskV4@4
+            displayName: 'terraform init'
             inputs:
-              azureSubscription: 'ecommerce-azure-connection'
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                az bicep build --file $(bicepMainFile)
-                echo "Bicep build completed successfully."
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(TF_DIR)'
+              backendServiceArm: 'ecommerce-azure-connection'
+              backendAzureRmResourceGroupName: '$(TF_STATE_RG)'
+              backendAzureRmStorageAccountName: '$(TF_STATE_SA)'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: 'ecommerce.terraform.tfstate'
 
-          - task: AzureCLI@2
-            displayName: 'What-If against Dev resource group'
-            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+          - task: TerraformTaskV4@4
+            displayName: 'terraform plan'
             inputs:
-              azureSubscription: 'ecommerce-azure-connection'
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                az deployment group what-if \
-                  --subscription $(AZURE_SUBSCRIPTION_ID) \
-                  --resource-group $(RESOURCE_GROUP_DEV) \
-                  --template-file $(bicepMainFile) \
-                  --parameters $(bicepParametersFile) \
-                  --parameters environment=dev \
-                               postgresAdminPassword=$(POSTGRES_ADMIN_PASSWORD) \
-                               apimPublisherEmail=$(APIM_PUBLISHER_EMAIL) \
-                               aadTenantId=$(AAD_TENANT_ID) \
-                               aadApiClientId=$(AAD_API_CLIENT_ID) \
-                               uiOrigin=$(UI_ORIGIN)
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(TF_DIR)'
+              environmentServiceNameAzureRM: 'ecommerce-azure-connection'
+              commandOptions: '-var-file="terraform.tfvars" -out=tfplan'
 
-  # ─── Stage: Deploy to Dev ──────────────────────────────────────────────────
-  - stage: DeployDev
-    displayName: 'Deploy Infrastructure — Dev'
-    dependsOn: ValidateBicep
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
-    variables:
-      targetEnvironment: 'dev'
-      targetResourceGroup: $(RESOURCE_GROUP_DEV)
-    jobs:
-      - deployment: DeployBicepDev
-        displayName: 'Bicep Deploy to Dev'
-        environment: 'dev'
-        pool:
-          vmImage: 'ubuntu-latest'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish tfplan artifact'
+            inputs:
+              targetPath: '$(TF_DIR)/tfplan'
+              artifact: 'tfplan'
 
-                - task: AzureCLI@2
-                  displayName: 'Deploy Bicep — Dev'
-                  inputs:
-                    azureSubscription: 'ecommerce-azure-connection'
-                    scriptType: 'bash'
-                    scriptLocation: 'inlineScript'
-                    inlineScript: |
-                      az bicep install
-
-                      DEPLOYMENT_OUTPUT=$(az deployment group create \
-                        --subscription $(AZURE_SUBSCRIPTION_ID) \
-                        --resource-group $(targetResourceGroup) \
-                        --template-file $(bicepMainFile) \
-                        --parameters $(bicepParametersFile) \
-                        --parameters environment=$(targetEnvironment) \
-                                     postgresAdminPassword=$(POSTGRES_ADMIN_PASSWORD) \
-                                     apimPublisherEmail=$(APIM_PUBLISHER_EMAIL) \
-                                     aadTenantId=$(AAD_TENANT_ID) \
-                                     aadApiClientId=$(AAD_API_CLIENT_ID) \
-                                     uiOrigin=$(UI_ORIGIN) \
-                        --name "ecommerce-$(targetEnvironment)-$(Build.BuildId)" \
-                        --output json)
-
-                      echo "Deployment outputs:"
-                      echo "$DEPLOYMENT_OUTPUT" | jq '.properties.outputs'
-
-                      # Export outputs as pipeline variables for downstream use
-                      AKS_CLUSTER=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.aksClusterName.value')
-                      ACR_SERVER=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.acrLoginServer.value')
-                      echo "##vso[task.setvariable variable=aksClusterName;isOutput=true]$AKS_CLUSTER"
-                      echo "##vso[task.setvariable variable=acrLoginServer;isOutput=true]$ACR_SERVER"
-
-  # ─── Stage: Deploy to Staging ─────────────────────────────────────────────
-  - stage: DeployStaging
-    displayName: 'Deploy Infrastructure — Staging'
-    dependsOn: ValidateBicep
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/staging'))
-    variables:
-      targetEnvironment: 'staging'
-      targetResourceGroup: $(RESOURCE_GROUP_STAGING)
-    jobs:
-      - deployment: DeployBicepStaging
-        displayName: 'Bicep Deploy to Staging'
-        environment: 'staging'   # Requires approval from tech lead
-        pool:
-          vmImage: 'ubuntu-latest'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
-
-                - task: AzureCLI@2
-                  displayName: 'Deploy Bicep — Staging'
-                  inputs:
-                    azureSubscription: 'ecommerce-azure-connection'
-                    scriptType: 'bash'
-                    scriptLocation: 'inlineScript'
-                    inlineScript: |
-                      az bicep install
-
-                      az deployment group create \
-                        --subscription $(AZURE_SUBSCRIPTION_ID) \
-                        --resource-group $(targetResourceGroup) \
-                        --template-file $(bicepMainFile) \
-                        --parameters $(bicepParametersFile) \
-                        --parameters environment=$(targetEnvironment) \
-                                     postgresAdminPassword=$(POSTGRES_ADMIN_PASSWORD) \
-                                     apimPublisherEmail=$(APIM_PUBLISHER_EMAIL) \
-                                     aadTenantId=$(AAD_TENANT_ID) \
-                                     aadApiClientId=$(AAD_API_CLIENT_ID) \
-                                     uiOrigin=$(UI_ORIGIN) \
-                        --name "ecommerce-$(targetEnvironment)-$(Build.BuildId)"
-
-  # ─── Stage: Deploy to Prod ────────────────────────────────────────────────
-  - stage: DeployProd
-    displayName: 'Deploy Infrastructure — Prod'
-    dependsOn: DeployStaging
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-    variables:
-      targetEnvironment: 'prod'
-      targetResourceGroup: $(RESOURCE_GROUP_PROD)
-    jobs:
-      - deployment: DeployBicepProd
-        displayName: 'Bicep Deploy to Prod'
-        environment: 'prod'   # Requires two approvals
-        pool:
-          vmImage: 'ubuntu-latest'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
-
-                - task: AzureCLI@2
-                  displayName: 'Deploy Bicep — Prod'
-                  inputs:
-                    azureSubscription: 'ecommerce-azure-connection'
-                    scriptType: 'bash'
-                    scriptLocation: 'inlineScript'
-                    inlineScript: |
-                      az bicep install
-
-                      az deployment group create \
-                        --subscription $(AZURE_SUBSCRIPTION_ID) \
-                        --resource-group $(targetResourceGroup) \
-                        --template-file $(bicepMainFile) \
-                        --parameters $(bicepParametersFile) \
-                        --parameters environment=$(targetEnvironment) \
-                                     postgresAdminPassword=$(POSTGRES_ADMIN_PASSWORD) \
-                                     apimPublisherEmail=$(APIM_PUBLISHER_EMAIL) \
-                                     aadTenantId=$(AAD_TENANT_ID) \
-                                     aadApiClientId=$(AAD_API_CLIENT_ID) \
-                                     uiOrigin=$(UI_ORIGIN) \
-                        --name "ecommerce-$(targetEnvironment)-$(Build.BuildId)"
-
-                - task: AzureCLI@2
-                  displayName: 'Verify AKS cluster reachable'
-                  inputs:
-                    azureSubscription: 'ecommerce-azure-connection'
-                    scriptType: 'bash'
-                    scriptLocation: 'inlineScript'
-                    inlineScript: |
-                      RESOURCE_GROUP=$(targetResourceGroup)
-                      CLUSTER_NAME=$(az aks list -g $RESOURCE_GROUP --query '[0].name' -o tsv)
-                      az aks get-credentials --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --overwrite-existing
-                      kubectl get nodes
-                      echo "AKS cluster is reachable."
-
-  # ─── Stage: Smoke Test (post-prod) ────────────────────────────────────────
-  - stage: SmokeTest
-    displayName: 'Post-Deployment Smoke Test'
-    dependsOn: DeployProd
+  # ─── Stage 2: Terraform Apply (manual approval recommended) ───────────────
+  - stage: TerraformApply
+    displayName: 'Terraform Apply'
+    dependsOn: TerraformPlan
     condition: succeeded()
     jobs:
-      - job: SmokeTest
-        displayName: 'API Health Checks'
+      - deployment: Apply
+        displayName: 'terraform apply'
         pool:
           vmImage: 'ubuntu-latest'
-        steps:
-          - task: AzureCLI@2
-            displayName: 'Check APIM gateway health'
-            inputs:
-              azureSubscription: 'ecommerce-azure-connection'
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                APIM_URL=$(az apim list -g $(RESOURCE_GROUP_PROD) --query '[0].gatewayUrl' -o tsv)
-                echo "APIM Gateway URL: $APIM_URL"
+        environment: 'infrastructure'   # Add approval gate here in Azure DevOps UI
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
 
-                HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APIM_URL/api/products/")
-                if [ "$HTTP_STATUS" -eq 401 ]; then
-                  echo "APIM gateway is responding (401 = auth required, as expected without token)"
-                  exit 0
-                else
-                  echo "Unexpected status: $HTTP_STATUS"
-                  exit 1
-                fi
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform $(TF_VERSION)'
+                  inputs:
+                    terraformVersion: '$(TF_VERSION)'
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download tfplan'
+                  inputs:
+                    artifact: 'tfplan'
+                    targetPath: '$(TF_DIR)'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform init'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'init'
+                    workingDirectory: '$(TF_DIR)'
+                    backendServiceArm: 'ecommerce-azure-connection'
+                    backendAzureRmResourceGroupName: '$(TF_STATE_RG)'
+                    backendAzureRmStorageAccountName: '$(TF_STATE_SA)'
+                    backendAzureRmContainerName: 'tfstate'
+                    backendAzureRmKey: 'ecommerce.terraform.tfstate'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'terraform apply'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'apply'
+                    workingDirectory: '$(TF_DIR)'
+                    environmentServiceNameAzureRM: 'ecommerce-azure-connection'
+                    commandOptions: 'tfplan'
