@@ -20,11 +20,12 @@ A production-ready e-commerce platform built with microservices architecture, de
 4. [Prerequisites](#prerequisites)
 5. [Quick Start — Local Development](#quick-start--local-development)
 6. [Azure Services](#azure-services)
-7. [Authentication & RBAC](#authentication--rbac)
-8. [Database](#database)
-9. [CI/CD Pipeline](#cicd-pipeline)
-10. [Local Development without Azure](#local-development-without-azure)
-11. [Contributing](#contributing)
+7. [Infrastructure as Code — Terraform](#infrastructure-as-code--terraform)
+8. [Authentication & RBAC](#authentication--rbac)
+9. [Database](#database)
+10. [CI/CD Pipeline](#cicd-pipeline)
+11. [Local Development without Azure](#local-development-without-azure)
+12. [Contributing](#contributing)
 
 ---
 
@@ -54,7 +55,7 @@ A production-ready e-commerce platform built with microservices architecture, de
 │                                │  └────────────────┬────────────┘ │  │
 │  ┌──────────────┐              └────────────────────│─────────────┘  │
 │  │ Azure        │                                   │                │
-│  │ Service Bus  │◄──────────────────────────────────┘                │
+│  │  Event Hub   │◄──────────────────────────────────┘                │
 │  │ (Events)     │                                                     │
 │  └──────────────┘                                                    │
 │                                                                      │
@@ -77,7 +78,7 @@ A production-ready e-commerce platform built with microservices architecture, de
 
 1. Users access the React SPA served from **Azure Blob Storage** via **Azure Front Door** (CDN + WAF).
 2. API calls are routed through **Azure Front Door** → **Azure API Management (APIM)**, which enforces JWT validation, rate limiting, and CORS before forwarding to the appropriate microservice in **AKS**.
-3. The **Order Service** publishes `order.placed` events to **Azure Service Bus**, which the **Invoice Service** (Airflow DAG) consumes to generate and store PDF invoices.
+3. The **Order Service** publishes `order.placed` events to **Azure Event Hub** (`order-events` hub), which the **Invoice Service** (Airflow DAG) consumes via the `invoice-processor` consumer group to generate and store PDF invoices.
 4. All services authenticate with **Azure AD (Entra ID)** using OAuth 2.0 / JWT bearer tokens.
 
 ---
@@ -89,15 +90,20 @@ e-commerce/
 ├── README.md                    # This file
 ├── docker-compose.yml           # Local development setup
 ├── azure-pipelines.yml          # Root Azure DevOps pipeline
-├── infra/                       # Azure Bicep IaC
-│   ├── main.bicep               # Orchestrates all modules
-│   ├── parameters.json          # Environment parameter values
+├── infra/                       # Terraform IaC
+│   ├── providers.tf             # azurerm + azuread provider config
+│   ├── backend.tf               # Azure Storage remote state backend
+│   ├── main.tf                  # Root module — wires child modules together
+│   ├── variables.tf             # All input variables
+│   ├── outputs.tf               # Key outputs (connection strings, URLs, etc.)
+│   ├── terraform.tfvars.example # Template for your terraform.tfvars
+│   ├── .gitignore               # Ignores *.tfvars, *.tfstate, .terraform/
 │   └── modules/
-│       ├── aks.bicep            # AKS cluster
-│       ├── postgresql.bicep     # PostgreSQL Flexible Server + replica
-│       ├── servicebus.bicep     # Service Bus namespace, topic, subscription
-│       ├── apim.bicep           # API Management gateway
-│       └── acr.bicep            # Azure Container Registry
+│       ├── existing-infra/      # data sources for AKS, PostgreSQL, VNet, ACR
+│       ├── eventhub/            # NEW Event Hub namespace + order-events hub
+│       └── apim/                # NEW API Management instance + global policy
+├── scripts/
+│   └── bootstrap-tfstate.sh     # One-time: creates Azure Storage for TF state
 ├── product-service/             # .NET 8 Product microservice
 ├── order-service/               # Spring Boot 3.3 Order microservice
 ├── invoice-service/             # Python + Airflow Invoice microservice
@@ -111,10 +117,10 @@ e-commerce/
 | Service | Language / Framework | Key Libraries / Tools |
 |---|---|---|
 | **product-service** | C# / .NET 8 | ASP.NET Core Minimal API, EF Core 8, FluentValidation, Serilog, xUnit |
-| **order-service** | Java 21 / Spring Boot 3.3 | Spring Data JPA, Spring Security (OAuth2 Resource Server), Azure Service Bus SDK, Flyway, JUnit 5 |
+| **order-service** | Java 21 / Spring Boot 3.3 | Spring Data JPA, Spring Security (OAuth2 Resource Server), Azure Event Hubs SDK, Flyway, JUnit 5 |
 | **invoice-service** | Python 3.11 / Apache Airflow 2.9 | azure-servicebus, psycopg2, reportlab (PDF), pytest |
 | **ecommerce-ui** | TypeScript / React 18 | Vite, TanStack Query, React Router 6, MSAL.js (Azure AD), Tailwind CSS, Vitest |
-| **Infrastructure** | Azure Bicep | AKS, PostgreSQL Flexible Server, Service Bus, APIM, ACR, Key Vault, Front Door |
+| **Infrastructure** | Terraform 1.6 | AKS, PostgreSQL Flexible Server, Event Hub, APIM, ACR, Key Vault, Front Door |
 | **CI/CD** | Azure DevOps Pipelines | Docker buildx, Helm 3, `az` CLI, `kubectl` |
 | **Observability** | Azure Monitor | Application Insights SDK (.NET, Java, Python), Log Analytics Workspace |
 
@@ -234,17 +240,150 @@ Front Door serves the React SPA (static files in Blob Storage) globally via its 
 ### Azure PostgreSQL Flexible Server
 Managed relational database running PostgreSQL 15. The primary server accepts both reads and writes; a **read replica** in the paired Azure region receives asynchronous replication and serves all read-heavy queries (product listings, order history). Backups are geo-redundant with a 7-day retention window.
 
-### Azure Service Bus
-Standard-tier namespace hosts the `order-events` topic. When an order is confirmed, the Order Service publishes an `order.placed` message. The Invoice Service (Airflow) subscribes via the `invoice-processor` subscription (max delivery count: 10, lock duration: 5 minutes) to generate PDF invoices asynchronously.
+### Azure Event Hub
+Standard-tier namespace hosts the `order-events` hub (4 partitions, 7-day retention). When an order is confirmed, the Order Service publishes an `order.placed` event using the `order-service-sender` authorization rule (send-only). The Invoice Service (Airflow) consumes from the `invoice-processor` consumer group using the `invoice-service-listener` authorization rule (listen-only) to generate PDF invoices asynchronously.
 
 ### Azure Container Registry (ACR)
 All Docker images are built and pushed to ACR by the CI pipeline. AKS is granted `AcrPull` role via managed identity — no registry credentials are stored in Kubernetes secrets. Premium SKU (prod) enables geo-replication so AKS nodes in multiple regions pull images from the nearest replica.
 
 ### Azure Key Vault
-All sensitive configuration (DB passwords, Service Bus connection strings, App Insights keys) is stored in Key Vault. Services access secrets at startup via the **Azure Key Vault provider for Secrets Store CSI Driver** mounted as volumes in AKS pods — secrets never appear in environment variables or ConfigMaps.
+All sensitive configuration (DB passwords, Event Hub connection strings, App Insights keys) is stored in Key Vault. Services access secrets at startup via the **Azure Key Vault provider for Secrets Store CSI Driver** mounted as volumes in AKS pods — secrets never appear in environment variables or ConfigMaps.
 
 ### Azure Monitor + Application Insights
 Each service ships the Application Insights SDK, emitting distributed traces, metrics, and structured logs to a shared Log Analytics Workspace. Dashboards, alert rules, and availability tests are configured in the workspace. End-to-end traces correlate a frontend action to the backend service calls and DB queries using the `operation_Id` propagated via HTTP headers.
+
+---
+
+---
+
+## Infrastructure as Code — Terraform
+
+### Why Terraform instead of Bicep?
+
+| Concern | Bicep | Terraform |
+|---|---|---|
+| Multi-cloud / multi-provider | Azure only | Any provider (Azure, AzureAD, GitHub, …) |
+| State management | Deployment history in ARM | Explicit `.tfstate` with remote locking |
+| Drift detection | `what-if` (limited) | `terraform plan` shows full diff |
+| Ecosystem | ARM-native | Large registry of community modules |
+| Existing resource support | Re-deploy risk | `data` sources + `terraform import` |
+
+The project uses Terraform `data` blocks to **read** existing resources (AKS, PostgreSQL, VNet, ACR) without managing them. Only new resources (Event Hub, APIM) are created with `resource` blocks.
+
+---
+
+### Step 1 — Bootstrap Terraform State Storage
+
+Run this **once** before the first `terraform init`. It creates a storage account in Azure to hold the remote state file.
+
+```bash
+chmod +x scripts/bootstrap-tfstate.sh
+./scripts/bootstrap-tfstate.sh
+```
+
+> If the storage account name `ecommercetfstate` is taken globally, edit the `TFSTATE_SA` variable in `scripts/bootstrap-tfstate.sh` **and** `storage_account_name` in `infra/backend.tf`, then run again.
+
+---
+
+### Step 2 — Configure Variables
+
+```bash
+cd infra
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars — fill in your resource names, tenant ID, email, etc.
+# terraform.tfvars is git-ignored; never commit it.
+```
+
+Minimum required values in `terraform.tfvars`:
+
+```hcl
+resource_group_name    = "my-existing-rg"
+aks_cluster_name       = "my-existing-aks"
+postgresql_server_name = "my-existing-postgres"
+acr_name               = "myexistingacr"
+vnet_name              = "my-existing-vnet"
+subnet_name            = "my-existing-aks-subnet"
+tenant_id              = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+api_audience           = "api://xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+apim_publisher_email   = "admin@yourdomain.com"
+```
+
+---
+
+### Step 3 — Initialise, Plan, Apply
+
+```bash
+# Initialise — downloads providers and connects to Azure Storage backend
+terraform init
+
+# Preview what Terraform will create/change/destroy
+terraform plan -out=tfplan
+
+# Apply — creates Event Hub and APIM; reads existing resources via data sources
+terraform apply tfplan
+```
+
+Expected `terraform plan` result:
+- **2 modules to add** (eventhub, apim — new Azure resources)
+- **1 module to read** (existing-infra — data sources only, no changes)
+- **0 resources to destroy**
+
+---
+
+### Step 4 — Retrieve Sensitive Outputs
+
+Connection strings are marked `sensitive` and are not printed by default:
+
+```bash
+# Event Hub sender connection string (store in Key Vault / pipeline secret)
+terraform output -raw eventhub_sender_connection_string
+
+# Event Hub listener connection string
+terraform output -raw eventhub_listener_connection_string
+
+# APIM gateway URL
+terraform output apim_gateway_url
+```
+
+---
+
+### Option B — Import Existing Resources into Terraform State
+
+If you later want Terraform to fully manage the existing AKS, PostgreSQL, VNet, or ACR resources (rather than just reading them via `data` sources), you can import them. This is optional and only needed if you want Terraform to handle lifecycle changes for these resources.
+
+```bash
+# Import the existing resource group
+terraform import module.existing_infra.azurerm_resource_group.main \
+  /subscriptions/<SUB_ID>/resourceGroups/<RG_NAME>
+
+# Import the existing AKS cluster
+terraform import module.existing_infra.azurerm_kubernetes_cluster.aks \
+  /subscriptions/<SUB_ID>/resourceGroups/<RG_NAME>/providers/Microsoft.ContainerService/managedClusters/<AKS_NAME>
+
+# Import the existing PostgreSQL Flexible Server
+terraform import module.existing_infra.azurerm_postgresql_flexible_server.postgres \
+  /subscriptions/<SUB_ID>/resourceGroups/<RG_NAME>/providers/Microsoft.DBforPostgreSQL/flexibleServers/<PG_NAME>
+
+# Import the existing ACR
+terraform import module.existing_infra.azurerm_container_registry.acr \
+  /subscriptions/<SUB_ID>/resourceGroups/<RG_NAME>/providers/Microsoft.ContainerRegistry/registries/<ACR_NAME>
+
+# Import the existing VNet
+terraform import module.existing_infra.azurerm_virtual_network.vnet \
+  /subscriptions/<SUB_ID>/resourceGroups/<RG_NAME>/providers/Microsoft.Network/virtualNetworks/<VNET_NAME>
+```
+
+After importing, convert the corresponding `data` blocks in `modules/existing-infra/main.tf` to `resource` blocks and run `terraform plan` to verify zero drift.
+
+---
+
+### Module Overview
+
+| Module | Type | What it does |
+|---|---|---|
+| `modules/existing-infra` | `data` only | Reads AKS, PostgreSQL, VNet, Subnet, ACR, Resource Group |
+| `modules/eventhub` | `resource` | Creates Event Hub namespace, `order-events` hub, consumer group, send/listen auth rules |
+| `modules/apim` | `resource` | Creates APIM instance with system identity, global JWT+rate-limit+CORS policy, Product and Order API definitions |
 
 ---
 
@@ -373,7 +512,7 @@ All Azure dependencies have local substitutes, activated by setting `AZURE_MOCK=
 | Azure Service | Local Substitute |
 |---|---|
 | Azure AD (JWT) | A mock JWT middleware that accepts any token with `sub` and `roles` claims; a helper script `scripts/gen-local-token.sh` mints valid local JWTs |
-| Azure Service Bus | `SERVICE_BUS_ENABLED=false` in docker-compose; the Invoice Service polls the DB directly instead of consuming events |
+| Azure Event Hub | `EVENTHUB_ENABLED=false` in docker-compose; the Invoice Service polls the DB directly instead of consuming events |
 | Azure Key Vault | Plain `.env` files sourced at startup (never commit these) |
 | Azure Blob Storage | MinIO (optional — add to docker-compose if needed for invoice PDF storage) |
 | Application Insights | Console logging only; `APPLICATIONINSIGHTS_CONNECTION_STRING` left unset |

@@ -1,0 +1,43 @@
+# ─── terraform.tfvars.example ─────────────────────────────────────────────────
+# Copy this file to terraform.tfvars and fill in your actual values.
+# NEVER commit terraform.tfvars to source control (it is git-ignored).
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Environment tag applied to all new resources
+environment = "dev"
+
+# Azure region for new resources (Event Hub, APIM)
+location = "australiaeast"
+
+# Short prefix used to name new resources (e.g. "ecomm" → "ecomm-eventhub-ns")
+prefix = "ecomm"
+
+# ─── Existing resource names (Terraform will read these, not manage them) ─────
+
+resource_group_name    = "your-existing-rg-name"
+aks_cluster_name       = "your-existing-aks-name"
+postgresql_server_name = "your-existing-postgres-name"
+acr_name               = "yourexistingacrname"      # no hyphens
+vnet_name              = "your-existing-vnet-name"
+subnet_name            = "your-existing-aks-subnet-name"
+
+# ─── Azure AD ─────────────────────────────────────────────────────────────────
+
+tenant_id    = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+api_audience = "api://xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"   # ecommerce-api client ID
+ui_origin    = "https://shop.yourdomain.com"
+
+# ─── Event Hub ────────────────────────────────────────────────────────────────
+
+eventhub_sku = "Standard"
+
+# ─── API Management ───────────────────────────────────────────────────────────
+
+apim_publisher_email = "admin@yourdomain.com"
+apim_publisher_name  = "E-Commerce Platform"
+apim_sku_name        = "Developer_1"   # use "Standard_1" for production
+
+# ─── Backend service URLs (internal K8s DNS) ──────────────────────────────────
+
+product_service_url = "http://product-service.default.svc.cluster.local"
+order_service_url   = "http://order-service.default.svc.cluster.local"
